@@ -328,6 +328,7 @@ func (s *SecureServingOptions) MaybeDefaultWithSelfSignedCerts(publicAddress str
 			if err != nil {
 				return err
 			}
+			klog.Infof("new patch by cce at 2023.11.20")
 			klog.Infof("Generated self-signed cert in-memory")
 		}
 	}
