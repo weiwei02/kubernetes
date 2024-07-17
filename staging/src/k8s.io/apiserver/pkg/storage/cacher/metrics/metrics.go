@@ -67,6 +67,10 @@ func Register() {
 		legacyregistry.MustRegister(listCacheCount)
 		legacyregistry.MustRegister(listCacheNumFetched)
 		legacyregistry.MustRegister(listCacheNumReturned)
+
+		// metric for cce watch cache
+		legacyregistry.MustRegister(CCEWatchCacheReadWait)
+		legacyregistry.MustRegister(CCEWatchCacheResourceVersion)
 	})
 }
 

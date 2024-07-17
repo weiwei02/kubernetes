@@ -455,6 +455,10 @@ func (wc *watchChan) prepareObjs(e *event) (curObj runtime.Object, oldObj runtim
 	return curObj, oldObj, nil
 }
 
+func (wc *watchChan) RequestWatchProgress() error {
+	return wc.watcher.client.RequestProgress(wc.ctx)
+}
+
 func decodeObj(codec runtime.Codec, versioner storage.Versioner, data []byte, rev int64) (_ runtime.Object, err error) {
 	obj, err := runtime.Decode(codec, []byte(data))
 	if err != nil {

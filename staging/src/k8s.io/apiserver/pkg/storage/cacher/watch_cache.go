@@ -192,6 +192,9 @@ type watchCache struct {
 
 	// For testing cache interval invalidation.
 	indexValidator indexValidator
+
+	// storageVersionManager is the storage version manager to exporter metrics for watch cachers.
+	storageVersionManager *cceStorageVersionManager
 }
 
 func newWatchCache(
@@ -201,23 +204,25 @@ func newWatchCache(
 	versioner storage.Versioner,
 	indexers *cache.Indexers,
 	clock clock.Clock,
-	objectType reflect.Type) *watchCache {
+	objectType reflect.Type,
+	storageVersionManager *cceStorageVersionManager) *watchCache {
 	wc := &watchCache{
-		capacity:            defaultLowerBoundCapacity,
-		keyFunc:             keyFunc,
-		getAttrsFunc:        getAttrsFunc,
-		cache:               make([]*watchCacheEvent, defaultLowerBoundCapacity),
-		lowerBoundCapacity:  defaultLowerBoundCapacity,
-		upperBoundCapacity:  defaultUpperBoundCapacity,
-		startIndex:          0,
-		endIndex:            0,
-		store:               cache.NewIndexer(storeElementKey, storeElementIndexers(indexers)),
-		resourceVersion:     0,
-		listResourceVersion: 0,
-		eventHandler:        eventHandler,
-		clock:               clock,
-		versioner:           versioner,
-		objectType:          objectType,
+		capacity:              defaultLowerBoundCapacity,
+		keyFunc:               keyFunc,
+		getAttrsFunc:          getAttrsFunc,
+		cache:                 make([]*watchCacheEvent, defaultLowerBoundCapacity),
+		lowerBoundCapacity:    defaultLowerBoundCapacity,
+		upperBoundCapacity:    defaultUpperBoundCapacity,
+		startIndex:            0,
+		endIndex:              0,
+		store:                 cache.NewIndexer(storeElementKey, storeElementIndexers(indexers)),
+		resourceVersion:       0,
+		listResourceVersion:   0,
+		eventHandler:          eventHandler,
+		clock:                 clock,
+		versioner:             versioner,
+		objectType:            objectType,
+		storageVersionManager: storageVersionManager,
 	}
 	objType := objectType.String()
 	watchCacheCapacity.WithLabelValues(objType).Set(float64(wc.capacity))
@@ -401,6 +406,9 @@ func (w *watchCache) UpdateResourceVersion(resourceVersion string) {
 		defer w.Unlock()
 		w.resourceVersion = rv
 	}()
+	if w.storageVersionManager != nil {
+		w.storageVersionManager.updateCacherResourceVersion(rv)
+	}
 
 	// Avoid calling event handler under lock.
 	// This is safe as long as there is at most one call to Add/Update/Delete and
@@ -567,6 +575,11 @@ func (w *watchCache) Replace(objs []interface{}, resourceVersion string) error {
 	return nil
 }
 
+func (w *watchCache) run() {
+	if w.storageVersionManager != nil {
+		w.storageVersionManager.run()
+	}
+}
 func (w *watchCache) SetOnReplace(onReplace func()) {
 	w.Lock()
 	defer w.Unlock()

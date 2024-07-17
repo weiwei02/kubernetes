@@ -1039,3 +1039,20 @@ func notFound(key string) clientv3.Cmp {
 func getTypeName(obj interface{}) string {
 	return reflect.TypeOf(obj).String()
 }
+
+func (s *store) RequestWatchProgress(ctx context.Context) error {
+	// Use watchContext to match ctx metadata provided when creating the watch.
+	// In best case scenario we would use the same context that watch was created, but there is no way access it from watchCache.
+	return s.client.RequestProgress(s.watchContext(ctx))
+}
+
+func (s *store) watchContext(ctx context.Context) context.Context {
+	// The etcd server waits until it cannot find a leader for 3 election
+	// timeouts to cancel existing streams. 3 is currently a hard coded
+	// constant. The election timeout defaults to 1000ms. If the cluster is
+	// healthy, when the leader is stopped, the leadership transfer should be
+	// smooth. (leader transfers its leadership before stopping). If leader is
+	// hard killed, other servers will take an election timeout to realize
+	// leader lost and start campaign.
+	return clientv3.WithRequireLeader(ctx)
+}

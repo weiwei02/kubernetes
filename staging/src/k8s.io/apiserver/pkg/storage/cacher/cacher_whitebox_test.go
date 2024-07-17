@@ -293,6 +293,10 @@ func (w *dummyWatch) Stop() {
 	close(w.ch)
 }
 
+func (w *dummyWatch) RequestWatchProgress() error {
+	return nil
+}
+
 func newDummyWatch() watch.Interface {
 	return &dummyWatch{
 		ch: make(chan watch.Event),
@@ -322,6 +326,10 @@ func (d *dummyStorage) GuaranteedUpdate(_ context.Context, _ string, _ runtime.O
 }
 func (d *dummyStorage) Count(_ string) (int64, error) {
 	return 0, fmt.Errorf("unimplemented")
+}
+
+func (w *dummyStorage) RequestWatchProgress(ctx context.Context) error {
+	return nil
 }
 
 func TestGetListCacheBypass(t *testing.T) {

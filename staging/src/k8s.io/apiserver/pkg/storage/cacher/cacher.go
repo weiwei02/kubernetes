@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/metadata"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
@@ -68,6 +70,10 @@ type Config struct {
 	// An underlying storage.Versioner.
 	Versioner storage.Versioner
 
+	// The GroupResource the cacher is caching. Used for disambiguating *unstructured.Unstructured (CRDs) in logging
+	// and metrics.
+	GroupResource schema.GroupResource
+
 	// The Cache will be caching objects of a given Type and assumes that they
 	// are all stored under ResourcePrefix directory in the underlying database.
 	ResourcePrefix string
@@ -95,7 +101,7 @@ type Config struct {
 
 	Codec runtime.Codec
 
-	Clock clock.Clock
+	Clock clock.WithTicker
 }
 
 type watchersMap map[int]*cacheWatcher
@@ -298,6 +304,10 @@ type Cacher struct {
 	bookmarkWatchers *watcherBookmarkTimeBuckets
 }
 
+func (c *Cacher) RequestWatchProgress(ctx context.Context) error {
+	return c.storage.RequestWatchProgress(ctx)
+}
+
 // NewCacherFromConfig creates a new Cacher responsible for servicing WATCH and LIST requests from
 // its internal cache and updating its cache in the background based on the
 // given configuration.
@@ -365,9 +375,12 @@ func NewCacherFromConfig(config Config) (*Cacher, error) {
 		<-cacher.timer.C
 	}
 
+	var contextMetadata = metadata.New(map[string]string{"source": "cache"})
+
+	storageVersionManager := newCCEStorageVersionManager(config.Storage, config.NewListFunc, config.ResourcePrefix, objType.String(), contextMetadata)
 	watchCache := newWatchCache(
-		config.KeyFunc, cacher.processEvent, config.GetAttrsFunc, config.Versioner, config.Indexers, config.Clock, objType)
-	listerWatcher := NewCacherListerWatcher(config.Storage, config.ResourcePrefix, config.NewListFunc)
+		config.KeyFunc, cacher.processEvent, config.GetAttrsFunc, config.Versioner, config.Indexers, config.Clock, objType, storageVersionManager)
+	listerWatcher := NewCacherListerWatcher(config.Storage, config.ResourcePrefix, config.NewListFunc, contextMetadata)
 	reflectorName := "storage/cacher.go:" + config.ResourcePrefix
 
 	reflector := cache.NewNamedReflector(reflectorName, listerWatcher, obj, watchCache, 0)
@@ -410,6 +423,7 @@ func (c *Cacher) startCaching(stopChannel <-chan struct{}) {
 		klog.V(1).Infof("cacher (%v): initialized", c.objectType.String())
 		watchCacheInitializations.WithLabelValues(c.objectType.String()).Inc()
 	})
+	c.watchCache.run()
 	defer func() {
 		if successfulList {
 			c.ready.set(false)
@@ -1058,17 +1072,19 @@ func (c *Cacher) LastSyncResourceVersion() (uint64, error) {
 
 // cacherListerWatcher opaques storage.Interface to expose cache.ListerWatcher.
 type cacherListerWatcher struct {
-	storage        storage.Interface
-	resourcePrefix string
-	newListFunc    func() runtime.Object
+	storage         storage.Interface
+	resourcePrefix  string
+	newListFunc     func() runtime.Object
+	contextMetadata metadata.MD
 }
 
 // NewCacherListerWatcher returns a storage.Interface backed ListerWatcher.
-func NewCacherListerWatcher(storage storage.Interface, resourcePrefix string, newListFunc func() runtime.Object) cache.ListerWatcher {
+func NewCacherListerWatcher(storage storage.Interface, resourcePrefix string, newListFunc func() runtime.Object, contextMetadata metadata.MD) cache.ListerWatcher {
 	return &cacherListerWatcher{
-		storage:        storage,
-		resourcePrefix: resourcePrefix,
-		newListFunc:    newListFunc,
+		storage:         storage,
+		resourcePrefix:  resourcePrefix,
+		newListFunc:     newListFunc,
+		contextMetadata: contextMetadata,
 	}
 }
 
@@ -1087,7 +1103,11 @@ func (lw *cacherListerWatcher) List(options metav1.ListOptions) (runtime.Object,
 		Predicate:            pred,
 		Recursive:            true,
 	}
-	if err := lw.storage.GetList(context.TODO(), lw.resourcePrefix, storageOpts, list); err != nil {
+	ctx := context.TODO()
+	if lw.contextMetadata != nil {
+		ctx = metadata.NewOutgoingContext(ctx, lw.contextMetadata)
+	}
+	if err := lw.storage.GetList(ctx, lw.resourcePrefix, storageOpts, list); err != nil {
 		return nil, err
 	}
 	return list, nil
@@ -1101,7 +1121,11 @@ func (lw *cacherListerWatcher) Watch(options metav1.ListOptions) (watch.Interfac
 		Recursive:       true,
 		ProgressNotify:  true,
 	}
-	return lw.storage.Watch(context.TODO(), lw.resourcePrefix, opts)
+	ctx := context.TODO()
+	if lw.contextMetadata != nil {
+		ctx = metadata.NewOutgoingContext(ctx, lw.contextMetadata)
+	}
+	return lw.storage.Watch(ctx, lw.resourcePrefix, opts)
 }
 
 // errWatcher implements watch.Interface to return a single error
@@ -1142,6 +1166,10 @@ func (c *errWatcher) ResultChan() <-chan watch.Event {
 // Implements watch.Interface.
 func (c *errWatcher) Stop() {
 	// no-op
+}
+
+func (c *errWatcher) RequestWatchProgress() error {
+	return nil
 }
 
 // cacheWatcher implements watch.Interface
@@ -1190,6 +1218,10 @@ func (c *cacheWatcher) ResultChan() <-chan watch.Event {
 // Implements watch.Interface.
 func (c *cacheWatcher) Stop() {
 	c.forget()
+}
+
+func (c *cacheWatcher) RequestWatchProgress() error {
+	return nil
 }
 
 // we rely on the fact that stopLocked is actually protected by Cacher.Lock()
